@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>皮衣老黄：重返舞台（恶搞小游戏）</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0b0f0c; color: #d7ffd0;
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  body { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; }
+  h1 { margin: 0; font-size: 20px; letter-spacing: 2px; color: #76b900; }
+  canvas { width: min(96vw, 900px); aspect-ratio: 900 / 420; border-radius: 12px;
+    box-shadow: 0 0 40px rgba(118,185,0,.35); background: #000; touch-action: none; cursor: pointer; }
+  p { margin: 0; font-size: 12px; opacity: .6; text-align: center; padding: 0 12px; }
+</style>
+</head>
+<body>
+<h1>皮衣老黄：重返舞台</h1>
+<canvas id="c"></canvas>
+<p>空格 / ↑ / 点击屏幕 = 跳（可二段跳）　·　纯属恶搞娱乐，剧情全是瞎编的，请勿当真</p>
+<script>
+(() => {
+  const W = 900, H = 420, GROUND = 340, GOAL = 25000; // 25000px = 2500 米
+  const cv = document.getElementById('c');
+  const ctx = cv.getContext('2d');
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  cv.width = W * dpr; cv.height = H * dpr;
+  ctx.scale(dpr, dpr);
+
+  // ---------- 音效 ----------
+  let ac = null;
+  function beep(freq, dur = 0.08, type = 'square', vol = 0.05) {
+    try {
+      ac = ac || new (window.AudioContext || window.webkitAudioContext)();
+      const o = ac.createOscillator(), g = ac.createGain();
+      o.type = type; o.frequency.value = freq;
+      g.gain.setValueAtTime(vol, ac.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.0001, ac.currentTime + dur);
+      o.connect(g); g.connect(ac.destination);
+      o.start(); o.stop(ac.currentTime + dur);
+    } catch (e) {}
+  }
+
+  // ---------- 状态 ----------
+  let state = 'title'; // title | play | finale | win | lose
+  let p, obstacles, items, pops, confetti, dist, stock, gpus, nextOb, nextItem, time, finaleT, stageX, shake, best = 0;
+  const rnd = (a, b) => a + Math.random() * (b - a);
+  const pick = arr => arr[Math.floor(Math.random() * arr.length)];
+
+  function reset() {
+    p = { x: 140, y: GROUND, vy: 0, jumps: 0, inv: 0, shield: false };
+    obstacles = []; items = []; pops = []; confetti = [];
+    dist = 0; stock = 100; gpus = 0; nextOb = 700; nextItem = 400;
+    time = 0; finaleT = 0; stageX = W + 60; shake = 0;
+  }
+  reset();
+
+  const HEADLINES = [
+    [0.00, '快讯：老黄表示"我只是出去买了件新皮衣"'],
+    [0.15, '董事会：我们无意让他回来（语气坚定）'],
+    [0.35, '董事会：我们基本无意让他回来（语气一般）'],
+    [0.55, '分析师：没有皮衣的发布会就像没有显卡的电脑'],
+    [0.72, '董事会：其实我们一直很想他'],
+    [0.88, '现场观众已开始高喊："The more you buy, the more you save!"'],
+  ];
+  const QUOTES = ['买得越多，省得越多！', 'AI 工厂！', '摩尔定律已死！', '这块卡，很烫！', 'Token 经济学！', '加速计算！'];
+
+  function pop(text, x, y, color = '#fff') { pops.push({ text, x, y, t: 0, color }); }
+
+  // ---------- 输入 ----------
+  function action() {
+    if (state === 'title' || state === 'win' || state === 'lose') {
+      if (state !== 'title' && time < 0.8) return;
+      reset(); state = 'play'; beep(660, 0.1); return;
+    }
+    if (state === 'play' && p.jumps < 2) {
+      p.vy = p.jumps === 0 ? -760 : -680;
+      p.jumps++;
+      beep(p.jumps === 1 ? 520 : 700, 0.07);
+    }
+  }
+  window.addEventListener('keydown', e => {
+    if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW' || e.code === 'Enter') {
+      e.preventDefault(); if (!e.repeat) action();
+    }
+  });
+  cv.addEventListener('pointerdown', e => { e.preventDefault(); action(); });
+
+  // ---------- 生成 ----------
+  function spawnObstacle(prog) {
+    const r = Math.random();
+    const x = W + 60;
+    if (r < 0.34) {
+      // 董事：前期举 NO，后期变成欢迎牌（可以吃）
+      const friendly = prog > 0.72;
+      const sign = friendly ? pick(['回来吧', 'YES', '想你了']) : (prog > 0.4 ? pick(['再议', '嗯…', 'NO']) : pick(['NO', '不同意', '免谈']));
+      obstacles.push({ type: 'board', x, w: 34, h: 62, y: GROUND - 62, sign, friendly });
+    } else if (r < 0.56) {
+      obstacles.push({ type: 'barrier', x, w: 78, h: 34, y: GROUND - 34 });
+    } else if (r < 0.80) {
+      const high = Math.random() < 0.5;
+      obstacles.push({ type: 'bear', x, w: 52, h: 40, y: high ? GROUND - 122 : GROUND - 58, high, ph: rnd(0, 6) });
+    } else {
+      obstacles.push({ type: 'reporter', x, w: 34, h: 58, y: GROUND - 58, q: pick(['请问…', '回应一下？', '说两句！']) });
+    }
+  }
+  function spawnItem() {
+    const r = Math.random();
+    const y = pick([GROUND - 40, GROUND - 120, GROUND - 190]);
+    if (r < 0.1 && !p.shield) items.push({ type: 'jacket', x: W + 40, y, w: 34, h: 34 });
+    else {
+      const n = Math.floor(rnd(1, 4));
+      for (let i = 0; i < n; i++) items.push({ type: 'gpu', x: W + 40 + i * 52, y, w: 38, h: 24 });
+    }
+  }
+
+  // ---------- 更新 ----------
+  function hit(a, b) { return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y; }
+
+  function update(dt) {
+    time += dt;
+    for (const q of pops) { q.t += dt; q.y -= 40 * dt; }
+    pops = pops.filter(q => q.t < 1.2);
+    for (const c of confetti) { c.x += c.vx * dt; c.y += c.vy * dt; c.vy += 300 * dt; c.r += c.vr * dt; }
+    confetti = confetti.filter(c => c.y < H + 20);
+    shake = Math.max(0, shake - dt * 30);
+
+    if (state === 'play') {
+      const prog = Math.min(1, dist / GOAL);
+      const speed = 330 + prog * 230;
+      dist += speed * dt;
+
+      // 玩家物理
+      p.vy += 2200 * dt; p.y += p.vy * dt;
+      if (p.y >= GROUND) { p.y = GROUND; p.vy = 0; p.jumps = 0; }
+      p.inv = Math.max(0, p.inv - dt);
+
+      // 生成
+      if (dist < GOAL - 500) {
+        nextOb -= speed * dt;
+        if (nextOb <= 0) { spawnObstacle(prog); nextOb = rnd(420, 760) - prog * 120; }
+        nextItem -= speed * dt;
+        if (nextItem <= 0) { spawnItem(); nextItem = rnd(260, 520); }
+      }
+
+      const box = { x: p.x - 12, y: p.y - 60, w: 24, h: 58 };
+      for (const o of obstacles) {
+        o.x -= speed * dt;
+        if (o.type === 'bear') o.x -= 70 * dt;
+        if (o.done) continue;
+        const ob = { x: o.x + 5, y: o.y + 5, w: o.w - 10, h: o.h - 8 };
+        if (hit(box, ob)) {
+          if (o.friendly) {
+            o.done = true; o.gone = true; stock += 8;
+            pop('董事倒戈 +8', o.x, o.y - 10, '#76b900'); beep(880, 0.1, 'triangle');
+          } else if (p.inv <= 0) {
+            o.done = true;
+            if (p.shield) {
+              p.shield = false; p.inv = 1;
+              pop('备用皮衣挡了一下！', p.x - 30, p.y - 90, '#9fd8ff'); beep(300, 0.15, 'sawtooth');
+            } else {
+              const dmg = { board: 22, barrier: 20, bear: 26, reporter: 16 }[o.type];
+              stock -= dmg; p.inv = 1.2; shake = 10;
+              pop({ board: '被否决', barrier: '撞上出口管制', bear: '被做空', reporter: '被追问' }[o.type] + ' -' + dmg, p.x - 20, p.y - 90, '#ff5a5a');
+              beep(140, 0.25, 'sawtooth', 0.08);
+            }
+          }
+        }
+      }
+      obstacles = obstacles.filter(o => o.x > -120 && !o.gone);
+
+      for (const it of items) {
+        it.x -= speed * dt;
+        if (hit(box, { x: it.x, y: it.y, w: it.w, h: it.h })) {
+          it.gone = true;
+          if (it.type === 'gpu') {
+            gpus++; stock += 4; beep(980 + (gpus % 5) * 60, 0.05, 'triangle');
+            if (gpus % 6 === 0) pop(pick(QUOTES), p.x + 20, p.y - 100, '#ffe066');
+          } else {
+            p.shield = true; pop('获得备用皮衣（护盾）', p.x - 30, p.y - 100, '#9fd8ff'); beep(440, 0.2, 'triangle');
+          }
+        }
+      }
+      items = items.filter(it => it.x > -80 && !it.gone);
+
+      if (stock <= 0) { stock = 0; state = 'lose'; time = 0; beep(110, 0.6, 'sawtooth', 0.08); }
+      else if (dist >= GOAL) { state = 'finale'; finaleT = 0; }
+    }
+    else if (state === 'finale') {
+      finaleT += dt;
+      // 落地
+      p.vy += 2200 * dt; if (finaleT < 1.2) { p.y = Math.min(GROUND, p.y + p.vy * dt); }
+      const a = Math.min(1, finaleT / 1.2);
+      stageX = (W + 60) + (500 - (W + 60)) * (1 - Math.pow(1 - a, 3));
+      for (const o of obstacles) o.x -= 400 * dt;
+      for (const it of items) it.x -= 400 * dt;
+      if (finaleT > 1.2) {
+        const b = Math.min(1, (finaleT - 1.2) / 1.0);
+        p.x = 140 + (680 - 140) * b;
+        p.y = GROUND - 56 * b - Math.sin(b * Math.PI) * 90;
+      }
+      if (finaleT > 2.3) {
+        state = 'win'; time = 0; stock = Math.round(stock * 1.33);
+        best = Math.max(best, stock);
+        for (let i = 0; i < 160; i++) confetti.push({ x: rnd(0, W), y: rnd(-200, 0), vx: rnd(-60, 60), vy: rnd(40, 200), r: 0, vr: rnd(-8, 8), c: pick(['#76b900', '#ffe066', '#ff5a5a', '#9fd8ff', '#fff']) });
+        [523, 659, 784, 1047].forEach((f, i) => setTimeout(() => beep(f, 0.2, 'triangle', 0.07), i * 130));
+      }
+    }
+    else if (state === 'win' && confetti.length < 60) {
+      confetti.push({ x: rnd(0, W), y: -10, vx: rnd(-60, 60), vy: rnd(40, 160), r: 0, vr: rnd(-8, 8), c: pick(['#76b900', '#ffe066', '#ff5a5a', '#9fd8ff', '#fff']) });
+    }
+  }
+
+  // ---------- 绘制 ----------
+  function rr(x, y, w, h, r) { ctx.beginPath(); ctx.roundRect(x, y, w, h, r); ctx.fill(); }
+
+  function drawBackground() {
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, '#07130a'); g.addColorStop(1, '#12240f');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    // 远景：服务器机柜（数据中心）
+    for (let layer = 0; layer < 2; layer++) {
+      const par = layer ? 0.45 : 0.2, bw = layer ? 70 : 50, gap = layer ? 110 : 80;
+      const off = (dist * par) % gap;
+      for (let x = -off - gap; x < W + gap; x += gap) {
+        const idx = Math.floor((x + dist * par) / gap);
+        const bh = (layer ? 120 : 80) + ((idx * 37) % 5) * 14;
+        ctx.fillStyle = layer ? '#16301a' : '#0f2313';
+        ctx.fillRect(x, GROUND - bh, bw, bh);
+        for (let yy = GROUND - bh + 10; yy < GROUND - 8; yy += 12) {
+          ctx.fillStyle = ((idx + yy + Math.floor(time * 3)) % 4 === 0) ? '#76b900' : '#274d2a';
+          ctx.fillRect(x + 8, yy, bw - 16, 3);
+        }
+      }
+    }
+    // 地面（电路板）
+    ctx.fillStyle = '#0c1a0d'; ctx.fillRect(0, GROUND, W, H - GROUND);
+    ctx.fillStyle = '#76b900'; ctx.fillRect(0, GROUND, W, 3);
+    ctx.strokeStyle = 'rgba(118,185,0,.35)'; ctx.lineWidth = 2;
+    const off = dist % 60;
+    for (let x = -off; x < W + 60; x += 60) {
+      ctx.beginPath(); ctx.moveTo(x, GROUND + 14); ctx.lineTo(x + 26, GROUND + 14); ctx.lineTo(x + 38, GROUND + 30); ctx.stroke();
+      ctx.fillStyle = 'rgba(118,185,0,.5)'; ctx.fillRect(x + 36, GROUND + 28, 5, 5);
+    }
+  }
+
+  function drawHuang(x, footY, pose) {
+    ctx.save(); ctx.translate(x, footY);
+    const air = pose === 'air', cheer = pose === 'cheer';
+    const sw = (air || cheer) ? 0.5 : Math.sin(time * 16);
+    // 护盾
+    if (p.shield) { ctx.strokeStyle = 'rgba(159,216,255,.8)'; ctx.lineWidth = 3; ctx.beginPath(); ctx.ellipse(0, -32, 30, 42, 0, 0, 7); ctx.stroke(); }
+    // 腿
+    ctx.strokeStyle = '#1b1b1f'; ctx.lineWidth = 8; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(-4, -24); ctx.lineTo(-4 + sw * 10, -2); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(4, -24); ctx.lineTo(4 - sw * 10, -2); ctx.stroke();
+    // 皮衣
+    ctx.fillStyle = '#111114'; rr(-13, -50, 26, 30, 6);
+    ctx.fillStyle = '#2c2c33'; ctx.fillRect(-1, -48, 2, 26); // 拉链
+    ctx.fillStyle = 'rgba(255,255,255,.18)'; ctx.fillRect(-11, -47, 4, 18); // 皮衣反光
+    // 手臂
+    ctx.strokeStyle = '#111114'; ctx.lineWidth = 7;
+    if (cheer) {
+      ctx.beginPath(); ctx.moveTo(-11, -45); ctx.lineTo(-22, -68 + Math.sin(time * 10) * 3); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(11, -45); ctx.lineTo(22, -68 - Math.sin(time * 10) * 3); ctx.stroke();
+    } else {
+      ctx.beginPath(); ctx.moveTo(-10, -45); ctx.lineTo(-14 - sw * 8, -28); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(10, -45); ctx.lineTo(14 + sw * 8, -28); ctx.stroke();
+    }
+    // 头
+    ctx.fillStyle = '#e8b98a'; ctx.beginPath(); ctx.arc(0, -60, 11, 0, 7); ctx.fill();
+    // 银发
+    ctx.fillStyle = '#d9d9de'; ctx.beginPath(); ctx.arc(0, -63, 11.5, Math.PI * 1.05, Math.PI * 1.95); ctx.fill();
+    ctx.fillRect(-11, -66, 4, 6);
+    // 眼镜
+    ctx.strokeStyle = '#222'; ctx.lineWidth = 1.6;
+    ctx.strokeRect(-1, -62, 5, 4); ctx.strokeRect(6, -62, 5, 4);
+    ctx.beginPath(); ctx.moveTo(4, -60); ctx.lineTo(6, -60); ctx.stroke();
+    // 微笑
+    ctx.beginPath(); ctx.arc(4, -56, 4, 0.2, 2.2); ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawSuit(o, color, label, labelColor, bg) {
+    const x = o.x + o.w / 2, y = o.y + o.h;
+    ctx.fillStyle = color; rr(x - 12, y - 46, 24, 30, 5);
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.moveTo(x - 4, y - 46); ctx.lineTo(x + 4, y - 46); ctx.lineTo(x, y - 36); ctx.fill();
+    ctx.fillStyle = '#b3261e'; ctx.fillRect(x - 1.5, y - 44, 3, 12);
+    ctx.fillStyle = '#23232b'; ctx.fillRect(x - 9, y - 17, 7, 17); ctx.fillRect(x + 2, y - 17, 7, 17);
+    ctx.fillStyle = '#e3b58c'; ctx.beginPath(); ctx.arc(x, y - 55, 9, 0, 7); ctx.fill();
+    // 牌子
+    ctx.font = 'bold 13px sans-serif';
+    const tw = ctx.measureText(label).width + 12;
+    ctx.strokeStyle = '#8a6b3a'; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(x - 14, y - 40); ctx.lineTo(x - 14, y - 80); ctx.stroke();
+    ctx.fillStyle = bg; rr(x - 14 - tw / 2, y - 100, tw, 22, 4);
+    ctx.fillStyle = labelColor; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(label, x - 14, y - 88);
+  }
+
+  function drawObstacle(o) {
+    if (o.type === 'board') {
+      drawSuit(o, o.friendly ? '#2f5d2a' : '#3a3f55', o.sign, '#fff', o.friendly ? '#4c9a00' : '#c0392b');
+    } else if (o.type === 'reporter') {
+      drawSuit(o, '#6a4a8a', o.q, '#222', '#ffe066');
+      ctx.fillStyle = '#111'; ctx.fillRect(o.x - 8, o.y + 18, 14, 5); // 话筒
+    } else if (o.type === 'barrier') {
+      for (let i = 0; i < 6; i++) { ctx.fillStyle = i % 2 ? '#fff' : '#e53935'; ctx.fillRect(o.x + i * 13, o.y, 13, 18); }
+      ctx.fillStyle = '#555'; ctx.fillRect(o.x + 6, o.y + 18, 6, 16); ctx.fillRect(o.x + o.w - 12, o.y + 18, 6, 16);
+      ctx.fillStyle = '#111'; ctx.font = 'bold 11px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#ffe066'; ctx.fillText('出口管制', o.x + o.w / 2, o.y - 9);
+    } else if (o.type === 'bear') {
+      const by = o.y + Math.sin(time * 6 + o.ph) * 4, cx = o.x + o.w / 2, cy = by + o.h / 2;
+      ctx.fillStyle = '#7a4b2a'; ctx.beginPath(); ctx.ellipse(cx, cy, 24, 18, 0, 0, 7); ctx.fill();
+      ctx.beginPath(); ctx.arc(cx - 16, cy - 14, 7, 0, 7); ctx.arc(cx + 2, cy - 17, 7, 0, 7); ctx.fill();
+      ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(cx - 14, cy - 3, 4, 0, 7); ctx.fill();
+      ctx.fillStyle = '#111'; ctx.beginPath(); ctx.arc(cx - 15, cy - 3, 2, 0, 7); ctx.fill();
+      ctx.beginPath(); ctx.arc(cx - 24, cy + 3, 3, 0, 7); ctx.fill();
+      // 翅膀 & 下跌箭头
+      ctx.fillStyle = '#c9a27e'; const fl = Math.sin(time * 20 + o.ph) * 8;
+      ctx.beginPath(); ctx.moveTo(cx + 6, cy - 12); ctx.lineTo(cx + 26, cy - 26 + fl); ctx.lineTo(cx + 20, cy - 8); ctx.fill();
+      ctx.fillStyle = '#ff5a5a'; ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('做空 ↘', cx + 4, by - 10);
+    }
+  }
+
+  function drawItem(it) {
+    const bob = Math.sin(time * 5 + it.x * 0.02) * 3;
+    if (it.type === 'gpu') {
+      const x = it.x, y = it.y + bob;
+      ctx.fillStyle = '#1d1d22'; rr(x, y, it.w, it.h, 4);
+      ctx.fillStyle = '#76b900'; ctx.fillRect(x + 2, y + it.h - 4, it.w - 4, 3);
+      ctx.strokeStyle = '#9a9aa5'; ctx.lineWidth = 2;
+      for (const fx of [x + 11, x + 27]) {
+        ctx.beginPath(); ctx.arc(fx, y + 10, 6, 0, 7); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(fx, y + 10); ctx.lineTo(fx + Math.cos(time * 12) * 6, y + 10 + Math.sin(time * 12) * 6); ctx.stroke();
+      }
+    } else {
+      const x = it.x + it.w / 2, y = it.y + bob;
+      ctx.fillStyle = '#111114';
+      ctx.beginPath(); ctx.moveTo(x - 8, y); ctx.lineTo(x + 8, y); ctx.lineTo(x + 18, y + 10); ctx.lineTo(x + 12, y + 16);
+      ctx.lineTo(x + 10, y + 12); ctx.lineTo(x + 10, y + 34); ctx.lineTo(x - 10, y + 34); ctx.lineTo(x - 10, y + 12);
+      ctx.lineTo(x - 12, y + 16); ctx.lineTo(x - 18, y + 10); ctx.closePath(); ctx.fill();
+      ctx.strokeStyle = '#9fd8ff'; ctx.lineWidth = 2; ctx.stroke();
+    }
+  }
+
+  function drawStage() {
+    if (stageX > W + 40) return;
+    const x = stageX;
+    // 大屏
+    ctx.fillStyle = '#050805'; rr(x + 30, 60, 340, 190, 8);
+    ctx.strokeStyle = '#76b900'; ctx.lineWidth = 3; ctx.strokeRect(x + 30, 60, 340, 190);
+    ctx.fillStyle = '#76b900'; ctx.font = 'bold 44px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('欢迎回来', x + 200, 125);
+    ctx.fillStyle = '#d7ffd0'; ctx.font = '18px sans-serif';
+    ctx.fillText('年度发布会 · 皮衣专场', x + 200, 180);
+    // 聚光灯
+    if (state === 'win') {
+      ctx.fillStyle = 'rgba(255,255,220,.13)';
+      ctx.beginPath(); ctx.moveTo(x + 150, 0); ctx.lineTo(x + 120, GROUND - 56); ctx.lineTo(x + 250, GROUND - 56); ctx.lineTo(x + 210, 0); ctx.fill();
+    }
+    // 舞台
+    ctx.fillStyle = '#2a2a30'; ctx.fillRect(x, GROUND - 56, 420, 56);
+    ctx.fillStyle = '#76b900'; ctx.fillRect(x, GROUND - 56, 420, 5);
+    ctx.fillStyle = '#3a3a44'; for (let i = 0; i < 3; i++) ctx.fillRect(x - 54 + i * 18, GROUND - 18 * (i + 1), 54 - i * 18 + 2, 18 * (i + 1));
+    // 观众
+    for (let i = 0; i < 9; i++) {
+      const ax = x - 240 + i * 22 + (i % 2) * 4, up = state === 'win' ? Math.abs(Math.sin(time * 8 + i)) * 8 : 0;
+      if (ax < -20) continue;
+      ctx.fillStyle = ['#34495e', '#5d4037', '#455a64'][i % 3];
+      ctx.beginPath(); ctx.arc(ax, H - 30 - up, 10, 0, 7); ctx.fill(); ctx.fillRect(ax - 10, H - 22 - up, 20, 30);
+    }
+  }
+
+  function drawHUD() {
+    const prog = Math.min(1, dist / GOAL);
+    ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
+    // 股价
+    ctx.fillStyle = 'rgba(0,0,0,.55)'; rr(14, 12, 250, 46, 8);
+    ctx.fillStyle = '#9ad'; ctx.font = '11px sans-serif'; ctx.fillText('股价（恶搞版，非投资建议）', 24, 24);
+    ctx.fillStyle = '#222'; rr(24, 34, 150, 14, 4);
+    ctx.fillStyle = stock > 50 ? '#76b900' : stock > 25 ? '#ffb300' : '#e53935';
+    rr(24, 34, Math.max(4, Math.min(150, stock * 1.5)), 14, 4);
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 15px sans-serif'; ctx.fillText('$' + Math.round(stock), 184, 41);
+    // GPU & 护盾
+    ctx.fillStyle = 'rgba(0,0,0,.55)'; rr(274, 12, 150, 46, 8);
+    ctx.fillStyle = '#d7ffd0'; ctx.font = 'bold 15px sans-serif'; ctx.fillText('显卡 × ' + gpus, 286, 28);
+    ctx.font = '12px sans-serif'; ctx.fillStyle = p.shield ? '#9fd8ff' : '#667';
+    ctx.fillText(p.shield ? '备用皮衣：已就绪' : '备用皮衣：无', 286, 46);
+    // 进度
+    ctx.fillStyle = 'rgba(0,0,0,.55)'; rr(W - 314, 12, 300, 46, 8);
+    ctx.fillStyle = '#d7ffd0'; ctx.font = '12px sans-serif';
+    ctx.fillText('距离舞台 ' + Math.max(0, Math.round((GOAL - dist) / 10)) + ' 米', W - 302, 26);
+    ctx.fillStyle = '#222'; rr(W - 302, 38, 276, 10, 4);
+    ctx.fillStyle = '#76b900'; rr(W - 302, 38, Math.max(4, 276 * prog), 10, 4);
+    // 新闻条
+    let head = HEADLINES[0][1];
+    for (const [t, s] of HEADLINES) if (prog >= t) head = s;
+    ctx.fillStyle = 'rgba(0,0,0,.7)'; ctx.fillRect(0, H - 28, W, 28);
+    ctx.fillStyle = '#e53935'; ctx.fillRect(0, H - 28, 64, 28);
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 13px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('假新闻', 32, H - 14);
+    ctx.textAlign = 'left'; ctx.font = '13px sans-serif'; ctx.fillText(head, 76, H - 14);
+  }
+
+  function overlay(title, lines, color) {
+    ctx.fillStyle = 'rgba(0,0,0,.62)'; ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = color; ctx.font = 'bold 46px sans-serif'; ctx.fillText(title, W / 2, 120);
+    ctx.fillStyle = '#eaffea'; ctx.font = '18px sans-serif';
+    lines.forEach((l, i) => ctx.fillText(l, W / 2, 185 + i * 32));
+    if (Math.floor(time * 2) % 2 === 0) {
+      ctx.fillStyle = '#ffe066'; ctx.font = 'bold 20px sans-serif';
+      ctx.fillText('按 空格 / 点击 开始', W / 2, 185 + lines.length * 32 + 30);
+    }
+  }
+
+  function draw() {
+    ctx.save();
+    if (shake > 0) ctx.translate(rnd(-shake, shake), rnd(-shake, shake));
+    drawBackground();
+    drawStage();
+    for (const it of items) drawItem(it);
+    for (const o of obstacles) drawObstacle(o);
+    if (!(p.inv > 0 && Math.floor(time * 20) % 2 === 0)) {
+      const pose = state === 'win' ? 'cheer' : (p.y < GROUND - 2 && state !== 'finale' ? 'air' : (state === 'title' || state === 'lose' ? 'air' : 'run'));
+      drawHuang(p.x, p.y, pose);
+    }
+    for (const c of confetti) { ctx.save(); ctx.translate(c.x, c.y); ctx.rotate(c.r); ctx.fillStyle = c.c; ctx.fillRect(-4, -2, 8, 4); ctx.restore(); }
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle'; ctx.font = 'bold 15px sans-serif';
+    for (const q of pops) { ctx.globalAlpha = Math.max(0, 1 - q.t / 1.2); ctx.fillStyle = q.color; ctx.fillText(q.text, q.x, q.y); }
+    ctx.globalAlpha = 1;
+    ctx.restore();
+    drawHUD();
+
+    if (state === 'title') overlay('皮衣老黄：重返舞台', [
+      '老黄要赶回发布会现场，一路上全是拦路的。',
+      '跳过董事的 NO 牌、出口管制路障、做空飞熊和记者，',
+      '多捡显卡拉股价，股价跌到 0 就又下台了。',
+    ], '#76b900');
+    else if (state === 'lose') overlay('又下台了…', [
+      '股价归零，跑了 ' + Math.round(dist / 10) + ' 米，捡了 ' + gpus + ' 块显卡。',
+      '董事会：我们就说吧。',
+    ], '#ff5a5a');
+    else if (state === 'win') {
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = 'rgba(0,0,0,.6)'; rr(40, 80, 400, 170, 12);
+      ctx.fillStyle = '#ffe066'; ctx.font = 'bold 40px sans-serif'; ctx.fillText('上台成功！', 240, 120);
+      ctx.fillStyle = '#eaffea'; ctx.font = '16px sans-serif';
+      ctx.fillText('股价应声 +33%，收于 $' + stock + '　显卡 × ' + gpus, 240, 162);
+      ctx.fillText('"买得越多，省得越多！"', 240, 190);
+      if (Math.floor(time * 2) % 2 === 0) { ctx.fillStyle = '#76b900'; ctx.font = 'bold 16px sans-serif'; ctx.fillText('按 空格 / 点击 再来一次（最高 $' + best + '）', 240, 226); }
+    }
+  }
+
+  let last = performance.now();
+  function loop(now) {
+    const dt = Math.min(0.033, (now - last) / 1000); last = now;
+    update(dt); draw();
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
